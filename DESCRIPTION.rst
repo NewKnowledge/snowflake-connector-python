@@ -9,6 +9,10 @@ Source code is also available at: https://github.com/snowflakedb/snowflake-conne
 Release Notes
 -------------------------------------------------------------------------------
 
+- v1.9.1(October 4, 2019)
+
+    - Add asn1crypto requirement to mitigate incompatibility change.
+
 - v1.9.0(August 26,2019)
 
     - Implement converter for all arrow data types in python connector extension
