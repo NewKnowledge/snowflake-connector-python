@@ -5,22 +5,18 @@
 #
 import time
 
+from mock import MagicMock, Mock, PropertyMock
 from snowflake.connector.auth import Auth
 from snowflake.connector.auth_default import AuthByDefault
-from snowflake.connector.compat import PY2
 from snowflake.connector.constants import OCSPMode
-from snowflake.connector.description import (CLIENT_NAME, CLIENT_VERSION)
+from snowflake.connector.description import CLIENT_NAME, CLIENT_VERSION
 from snowflake.connector.network import SnowflakeRestful
-
-if PY2:
-    from mock import MagicMock, Mock, PropertyMock
-else:
-    from unittest.mock import MagicMock, Mock, PropertyMock
 
 
 def _init_rest(application, post_requset):
     connection = MagicMock()
     connection._login_timeout = 120
+    connection._network_timeout = None
     connection.errorhandler = Mock(return_value=None)
     connection._ocsp_mode = Mock(return_value=OCSPMode.FAIL_OPEN)
     type(connection).application = PropertyMock(return_value=application)

@@ -7,11 +7,8 @@
 Various constants
 """
 
-from collections import defaultdict
-from collections import namedtuple
+from collections import defaultdict, namedtuple
 from enum import Enum
-
-from six import PY2
 
 DBAPI_TYPE_STRING = 0
 DBAPI_TYPE_BINARY = 1
@@ -36,7 +33,7 @@ FIELD_TYPES = [
 ]
 
 FIELD_NAME_TO_ID = defaultdict(int)
-FIELD_ID_TO_NAME = defaultdict(unicode if PY2 else str)  # noqa: F821
+FIELD_ID_TO_NAME = defaultdict(str)
 
 __binary_types = []
 __binary_type_names = []
@@ -119,6 +116,7 @@ class ResultStatus(Enum):
     COLLISION = u'COLLISION'
     SKIPPED = u'SKIPPED'
     RENEW_TOKEN = u'RENEW_TOKEN'
+    RENEW_PRESIGNED_URL = u'RENEW_PRESIGNED_URL'
     NOT_FOUND_FILE = u'NOT_FOUND_FILE'
     NEED_RETRY = u'NEED_RETRY'
     NEED_RETRY_WITH_LOWER_CONCURRENCY = u'NEED_RETRY_WITH_LOWER_CONCURRENCY'
@@ -144,8 +142,11 @@ PARAMETER_CLIENT_USE_SECURE_STORAGE_FOR_TEMPORARY_CREDENTIAL = \
 PARAMETER_TIMEZONE = u'TIMEZONE'
 PARAMETER_SERVICE_NAME = u'SERVICE_NAME'
 PARAMETER_CLIENT_VALIDATE_DEFAULT_PARAMETERS = u'CLIENT_VALIDATE_DEFAULT_PARAMETERS'
+PARAMETER_PYTHON_CONNECTOR_QUERY_RESULT_FORMAT = u'PYTHON_CONNECTOR_QUERY_RESULT_FORMAT'
 
 HTTP_HEADER_CONTENT_TYPE = u'Content-Type'
+HTTP_HEADER_CONTENT_ENCODING = u'Content-Encoding'
+HTTP_HEADER_ACCEPT_ENCODING = u'Accept-Encoding'
 HTTP_HEADER_ACCEPT = u"accept"
 HTTP_HEADER_USER_AGENT = u"User-Agent"
 HTTP_HEADER_SERVICE_NAME = u'X-Snowflake-Service'

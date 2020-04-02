@@ -3,29 +3,42 @@
 #
 # Copyright (c) 2012-2019 Snowflake Computing Inc. All right reserved.
 #
-
+import os
+import platform
+import sys
+import warnings
+from base64 import b64decode, b64encode
+from collections import OrderedDict
 from datetime import datetime, timezone
-
-from base64 import b64encode, b64decode
 from logging import getLogger
+from os import getenv
 
-from Cryptodome.Hash import SHA256, SHA384, SHA1, SHA512
+from Cryptodome.Hash import SHA1, SHA256, SHA384, SHA512
 from Cryptodome.PublicKey import RSA
 from Cryptodome.Signature import PKCS1_v1_5
 from asn1crypto.algos import DigestAlgorithm
-from asn1crypto.core import OctetString, Integer
-from asn1crypto.ocsp import CertId, OCSPRequest, TBSRequest, Requests, \
-    Request, OCSPResponse, Version
+from asn1crypto.core import Integer, OctetString
+from asn1crypto.ocsp import CertId, OCSPRequest, OCSPResponse, Request, Requests, TBSRequest, Version
 from asn1crypto.x509 import Certificate
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding, utils
 
-from snowflake.connector.errorcode import (
-    ER_INVALID_OCSP_RESPONSE,
-    ER_INVALID_OCSP_RESPONSE_CODE)
+from snowflake.connector.errorcode import ER_INVALID_OCSP_RESPONSE, ER_INVALID_OCSP_RESPONSE_CODE
 from snowflake.connector.errors import RevocationCheckError
 from snowflake.connector.ocsp_snowflake import SnowflakeOCSP
-from collections import OrderedDict
 from snowflake.connector.ssd_internal_keys import ret_wildcard_hkey
-from os import getenv
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    # force versioned dylibs onto oscrypto ssl on catalina
+    if sys.platform == 'darwin' and platform.mac_ver()[0].startswith('10.15'):
+        from oscrypto import use_openssl, _module_values
+        if _module_values['backend'] is None:
+            use_openssl(libcrypto_path='/usr/lib/libcrypto.35.dylib', libssl_path='/usr/lib/libssl.35.dylib')
+    from oscrypto import asymmetric
+
 
 logger = getLogger(__name__)
 
@@ -40,6 +53,12 @@ class SnowflakeOCSPAsn1Crypto(SnowflakeOCSP):
         'sha256': SHA256,
         'sha384': SHA384,
         'sha512': SHA512,
+    }
+
+    SIGNATURE_ALGORITHM_TO_DIGEST_CLASS_OPENSSL = {
+        'sha256': hashes.SHA256,
+        'sha384': hashes.SHA3_384,
+        'sha512': hashes.SHA3_512,
     }
 
     WILDCARD_CERTID = None
@@ -81,15 +100,14 @@ class SnowflakeOCSPAsn1Crypto(SnowflakeOCSP):
         if storage is None:
             storage = SnowflakeOCSP.ROOT_CERTIFICATES_DICT
         logger.debug('reading certificate bundle: %s', ca_bundle_file)
-        all_certs = open(ca_bundle_file, 'rb').read()
-
-        # don't lock storage
-        from asn1crypto import pem
-        pem_certs = pem.unarmor(all_certs, multiple=True)
-        for type_name, _, der_bytes in pem_certs:
-            if type_name == 'CERTIFICATE':
-                crt = Certificate.load(der_bytes)
-                storage[crt.subject.sha256] = crt
+        with open(ca_bundle_file, 'rb') as all_certs:
+            # don't lock storage
+            from asn1crypto import pem
+            pem_certs = pem.unarmor(all_certs.read(), multiple=True)
+            for type_name, _, der_bytes in pem_certs:
+                if type_name == 'CERTIFICATE':
+                    crt = Certificate.load(der_bytes)
+                    storage[crt.subject.sha256] = crt
 
     def create_ocsp_request(self, issuer, subject):
         """
@@ -153,8 +171,8 @@ class SnowflakeOCSPAsn1Crypto(SnowflakeOCSP):
         if cur_time > val_end or \
                 cur_time < val_start:
             debug_msg = "Certificate attached to OCSP response is invalid. OCSP response " \
-                        "current time - {0} certificate not before time - {1} certificate " \
-                        "not after time - {2}. Consider running curl -o ocsp.der {3}". \
+                        "current time - {} certificate not before time - {} certificate " \
+                        "not after time - {}. Consider running curl -o ocsp.der {}". \
                         format(cur_time,
                                val_start,
                                val_end,
@@ -176,7 +194,7 @@ class SnowflakeOCSPAsn1Crypto(SnowflakeOCSP):
 
         if res['response_status'].native != 'successful':
             raise RevocationCheckError(
-                msg="Invalid Status: {0}".format(res['response_status'].native),
+                msg="Invalid Status: {}".format(res['response_status'].native),
                 errno=ER_INVALID_OCSP_RESPONSE)
 
         basic_ocsp_response = res.basic_ocsp_response
@@ -233,7 +251,7 @@ class SnowflakeOCSPAsn1Crypto(SnowflakeOCSP):
 
         if res['response_status'].native != 'successful':
             raise RevocationCheckError(
-                msg="Invalid Status: {0}".format(res['response_status'].native),
+                msg="Invalid Status: {}".format(res['response_status'].native),
                 errno=ER_INVALID_OCSP_RESPONSE)
 
         basic_ocsp_response = res.basic_ocsp_response
@@ -300,34 +318,61 @@ class SnowflakeOCSPAsn1Crypto(SnowflakeOCSP):
                 self._process_unknown_status(cert_id)
             else:
                 debug_msg = "Unknown revocation status was returned." \
-                            "OCSP response may be malformed: {0}.".\
+                            "OCSP response may be malformed: {}.".\
                     format(cert_status)
                 raise RevocationCheckError(
                     msg=debug_msg,
                     errno=ER_INVALID_OCSP_RESPONSE_CODE
                 )
         except RevocationCheckError as op_er:
-            debug_msg = "{0} Consider running curl -o ocsp.der {1}".\
+            debug_msg = "{} Consider running curl -o ocsp.der {}".\
                 format(op_er.msg,
                            self.debug_ocsp_failure_url)
             raise RevocationCheckError(msg=debug_msg, errno=op_er.errno)
 
     def verify_signature(self, signature_algorithm, signature, cert, data):
-        pubkey = cert.public_key.unwrap().dump()
-        rsakey = RSA.importKey(pubkey)
-        signer = PKCS1_v1_5.new(rsakey)
-        if signature_algorithm in SnowflakeOCSPAsn1Crypto.SIGNATURE_ALGORITHM_TO_DIGEST_CLASS:
-            digest = \
-                SnowflakeOCSPAsn1Crypto.SIGNATURE_ALGORITHM_TO_DIGEST_CLASS[
+        use_openssl_only = os.getenv('USE_OPENSSL_ONLY', 'False') == 'True'
+        if not use_openssl_only:
+            pubkey = asymmetric.load_public_key(cert.public_key).unwrap().dump()
+            rsakey = RSA.importKey(pubkey)
+            signer = PKCS1_v1_5.new(rsakey)
+            if signature_algorithm in SnowflakeOCSPAsn1Crypto.SIGNATURE_ALGORITHM_TO_DIGEST_CLASS:
+                digest = \
+                    SnowflakeOCSPAsn1Crypto.SIGNATURE_ALGORITHM_TO_DIGEST_CLASS[
                     signature_algorithm].new()
+            else:
+                # the last resort. should not happen.
+                digest = SHA1.new()
+            digest.update(data.dump())
+            if not signer.verify(digest, signature):
+                raise RevocationCheckError(
+                    msg="Failed to verify the signature",
+                    errno=ER_INVALID_OCSP_RESPONSE)
+
         else:
-            # the last resort. should not happen.
-            digest = SHA1.new()
-        digest.update(data.dump())
-        if not signer.verify(digest, signature):
-            raise RevocationCheckError(
-                msg="Failed to verify the signature",
-                errno=ER_INVALID_OCSP_RESPONSE)
+            backend = default_backend()
+            public_key = serialization.load_der_public_key(cert.public_key.dump(), backend=default_backend())
+            if signature_algorithm in SnowflakeOCSPAsn1Crypto.SIGNATURE_ALGORITHM_TO_DIGEST_CLASS:
+                chosen_hash = \
+                    SnowflakeOCSPAsn1Crypto.SIGNATURE_ALGORITHM_TO_DIGEST_CLASS_OPENSSL[
+                        signature_algorithm]()
+            else:
+                # the last resort. should not happen.
+                chosen_hash = hashes.SHA1()
+            hasher = hashes.Hash(chosen_hash, backend)
+            hasher.update(data.dump())
+            digest = hasher.finalize()
+            try:
+                public_key.verify(
+                    signature,
+                    digest,
+                    padding.PKCS1v15(),
+                    utils.Prehashed(chosen_hash)
+                )
+            except InvalidSignature:
+                raise RevocationCheckError(
+                    msg="Failed to verify the signature",
+                    errno=ER_INVALID_OCSP_RESPONSE)
 
     def extract_certificate_chain(self, connection):
         """

@@ -6,17 +6,11 @@
 
 import codecs
 import os
-from six import PY2
-from io import StringIO, BytesIO
+from io import BytesIO, StringIO
 
-if PY2:
-    from mock import patch
-else:
-    from unittest.mock import patch
 import pytest
-
-from snowflake.connector import ProgrammingError
-from snowflake.connector.compat import PY2
+from mock import patch
+from snowflake.connector import DictCursor, ProgrammingError
 
 THIS_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -65,6 +59,76 @@ SELECT * FROM {tbl2} ORDER BY 1 DESC;
             assert ret1[0] == 3
             ret2 = curs[1].fetchone()
             assert ret2[0] == 103
+    finally:
+        with conn_cnx() as cnx:
+            cnx.execute_string("""
+            DROP TABLE IF EXISTS {tbl1};
+            DROP TABLE IF EXISTS {tbl2};
+            """.format(
+                tbl1=db_parameters['name'] + '1',
+                tbl2=db_parameters['name'] + '2'), return_cursors=False)
+
+
+def test_execute_string_dict_cursor(conn_cnx, db_parameters):
+    with conn_cnx() as cnx:
+        cnx.execute_string("""
+CREATE OR REPLACE TABLE {tbl1} (C1 int, C2 string);
+CREATE OR REPLACE TABLE {tbl2} (C1 int, C2 string);
+INSERT INTO {tbl1} VALUES(1,'test123');
+INSERT INTO {tbl1} VALUES(2,'test234');
+INSERT INTO {tbl1} VALUES(3,'test345');
+INSERT INTO {tbl2} VALUES(101,'test123');
+INSERT INTO {tbl2} VALUES(102,'test234');
+INSERT INTO {tbl2} VALUES(103,'test345');
+""".format(
+            tbl1=db_parameters['name'] + '1',
+            tbl2=db_parameters['name'] + '2'), return_cursors=False)
+    try:
+        with conn_cnx() as cnx:
+            ret = cnx.cursor(cursor_class=DictCursor).execute("""
+SELECT * FROM {tbl1} ORDER BY 1
+""".format(
+                tbl1=db_parameters['name'] + '1'
+            ))
+            assert ret.rowcount == 3
+            assert ret._use_dict_result
+            ret = ret.fetchall()
+            assert type(ret) is list
+            assert type(ret[0]) is dict
+            assert type(ret[2]) is dict
+            assert ret[0]['C1'] == 1
+            assert ret[2]['C2'] == 'test345'
+
+            ret = cnx.cursor(cursor_class=DictCursor).execute("""
+SELECT * FROM {tbl2} ORDER BY 2
+""".format(
+                tbl2=db_parameters['name'] + '2'
+            ))
+            assert ret.rowcount == 3
+            ret = ret.fetchall()
+            assert type(ret) is list
+            assert type(ret[0]) is dict
+            assert type(ret[2]) is dict
+            assert ret[0]['C1'] == 101
+            assert ret[2]['C2'] == 'test345'
+
+            curs = cnx.execute_string("""
+SELECT * FROM {tbl1} ORDER BY 1 DESC;
+SELECT * FROM {tbl2} ORDER BY 1 DESC;
+""".format(
+                tbl1=db_parameters['name'] + '1',
+                tbl2=db_parameters['name'] + '2'
+            ), cursor_class=DictCursor)
+            assert type(curs) is list
+            assert curs[0].rowcount == 3
+            assert curs[1].rowcount == 3
+            ret1 = curs[0].fetchone()
+            assert type(ret1) is dict
+            assert ret1['C1'] == 3
+            assert ret1['C2'] == 'test345'
+            ret2 = curs[1].fetchone()
+            assert type(ret2) is dict
+            assert ret2['C1'] == 103
     finally:
         with conn_cnx() as cnx:
             cnx.execute_string("""
@@ -124,23 +188,11 @@ def test_execute_stream(conn_cnx):
 
 def test_execute_stream_with_error(conn_cnx):
     # file stream
-    if PY2:
-        # Python2 converts data into binary data
-        # codecs.open() must be used
-        with open(os.path.join(
-                THIS_DIR, 'data', 'multiple_statements.sql')) as f:
-            with conn_cnx() as cnx:
-                gen = cnx.execute_stream(f)
-                with pytest.raises(TypeError):
-                    next(gen)
-    else:
-        # Python 3 converts data into Unicode data
-        expected_results = [1, 2, 3]
-        with open(os.path.join(
-                THIS_DIR, 'data', 'multiple_statements.sql')) as f:
-            with conn_cnx() as cnx:
-                for idx, rec in enumerate(cnx.execute_stream(f)):
-                    assert rec.fetchall()[0][0] == expected_results[idx]
+    expected_results = [1, 2, 3]
+    with open(os.path.join(THIS_DIR, 'data', 'multiple_statements.sql')) as f:
+        with conn_cnx() as cnx:
+            for idx, rec in enumerate(cnx.execute_stream(f)):
+                assert rec.fetchall()[0][0] == expected_results[idx]
 
     # read a file including syntax error in the middle
     with codecs.open(os.path.join(

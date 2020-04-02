@@ -4,30 +4,26 @@
 # Copyright (c) 2012-2019 Snowflake Computing Inc. All right reserved.
 #
 
-import os
+import uuid
 
 import pytest
+import snowflake.connector
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import dsa
-from cryptography.hazmat.primitives.asymmetric import rsa
-
-import snowflake.connector
-
-NO_ACCOUNTADMIN_PRIV = os.getenv('TRAVIS') == 'true' or \
-                       os.getenv('APPVEYOR') == 'True' or \
-                       os.getenv('sf_account') == 'testaccount5'
+from cryptography.hazmat.primitives.asymmetric import dsa, rsa
+from snowflake.connector.compat import TO_UNICODE
 
 
-@pytest.mark.skipif(
-    NO_ACCOUNTADMIN_PRIV,
-    reason="Change user's public key requires accountadmin privilege"
-)
-def test_different_key_length(request, conn_cnx, db_parameters):
+def test_different_key_length(is_public_test, request, conn_cnx, db_parameters):
+    if is_public_test:
+        pytest.skip('This test requires ACCOUNTADMIN privilege to set the public key')
+
+    test_user = "python_test_keypair_user_" + TO_UNICODE(uuid.uuid4()).replace('-', '_')
+
     db_config = {
         'protocol': db_parameters['protocol'],
         'account': db_parameters['account'],
-        'user': db_parameters['user'],
+        'user': test_user,
         'host': db_parameters['host'],
         'port': db_parameters['port'],
         'database': db_parameters['database'],
@@ -41,37 +37,42 @@ def test_different_key_length(request, conn_cnx, db_parameters):
         use role accountadmin
         """)
             cnx.cursor().execute("""
-        alter user {user} unset rsa_public_key
-        """.format(user=db_parameters['user']))
+        drop user if exists {user}
+        """.format(user=test_user))
 
     request.addfinalizer(fin)
 
     testcases = [2048, 4096, 8192]
 
-    for key_length in testcases:
-        private_key_der, public_key_der_encoded = generate_key_pair(key_length)
-
-        with conn_cnx() as cnx:
-            cnx.cursor().execute("""
+    with conn_cnx() as cnx:
+        cursor = cnx.cursor()
+        cursor.execute("""
     use role accountadmin
     """)
+        cursor.execute("create user " + test_user)
+
+        for key_length in testcases:
+            private_key_der, public_key_der_encoded = generate_key_pair(key_length)
+
             cnx.cursor().execute("""
-    alter user {user} set rsa_public_key='{public_key}'
-    """.format(user=db_parameters['user'], public_key=public_key_der_encoded))
+            alter user {user} set rsa_public_key='{public_key}'
+            """.format(user=test_user, public_key=public_key_der_encoded))
 
-        db_config['private_key'] = private_key_der
-        snowflake.connector.connect(**db_config)
+            db_config['private_key'] = private_key_der
+            with snowflake.connector.connect(**db_config) as _:
+                pass
 
 
-@pytest.mark.skipif(
-    NO_ACCOUNTADMIN_PRIV,
-    reason="Change user's public key requires accountadmin privilege"
-)
-def test_multiple_key_pair(request, conn_cnx, db_parameters):
+def test_multiple_key_pair(is_public_test, request, conn_cnx, db_parameters):
+    if is_public_test:
+        pytest.skip('This test requires ACCOUNTADMIN privilege to set the public key')
+
+    test_user = "python_test_keypair_user_" + TO_UNICODE(uuid.uuid4()).replace('-', '_')
+
     db_config = {
         'protocol': db_parameters['protocol'],
         'account': db_parameters['account'],
-        'user': db_parameters['user'],
+        'user': test_user,
         'host': db_parameters['host'],
         'port': db_parameters['port'],
         'database': db_parameters['database'],
@@ -85,11 +86,8 @@ def test_multiple_key_pair(request, conn_cnx, db_parameters):
         use role accountadmin
         """)
             cnx.cursor().execute("""
-        alter user {user} unset rsa_public_key
-        """.format(user=db_parameters['user']))
-            cnx.cursor().execute("""
-        alter user {user} unset rsa_public_key_2
-        """.format(user=db_parameters['user']))
+        drop user if exists {user}
+        """.format(user=test_user))
 
     request.addfinalizer(fin)
 
@@ -101,12 +99,16 @@ def test_multiple_key_pair(request, conn_cnx, db_parameters):
     use role accountadmin
     """)
         cnx.cursor().execute("""
+    create user {user}
+    """.format(user=test_user))
+        cnx.cursor().execute("""
     alter user {user} set rsa_public_key='{public_key}'
-    """.format(user=db_parameters['user'],
+    """.format(user=test_user,
                public_key=public_key_one_der_encoded))
 
     db_config['private_key'] = private_key_one_der
-    snowflake.connector.connect(**db_config)
+    with snowflake.connector.connect(**db_config) as _:
+        pass
 
     # assert exception since different key pair is used
     db_config['private_key'] = private_key_two_der
@@ -126,9 +128,11 @@ def test_multiple_key_pair(request, conn_cnx, db_parameters):
     """)
         cnx.cursor().execute("""
     alter user {user} set rsa_public_key_2='{public_key}'
-    """.format(user=db_parameters['user'],
+    """.format(user=test_user,
                public_key=public_key_two_der_encoded))
-    snowflake.connector.connect(**db_config)
+
+    with snowflake.connector.connect(**db_config) as _:
+        pass
 
 
 def test_bad_private_key(db_parameters):

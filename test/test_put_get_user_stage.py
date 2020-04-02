@@ -11,29 +11,28 @@ from logging import getLogger
 
 import pytest
 
+# Mark every test in this module as a putget test
+pytestmark = pytest.mark.putget
 
-@pytest.mark.skipif(
-    'AWS_ACCESS_KEY_ID' not in os.environ,
-    reason="Snowflake admin account is not accessible."
-)
+
 def test_put_get_small_data_via_user_stage(
-        tmpdir, test_files, conn_cnx, db_parameters):
+        is_public_test, tmpdir, test_files, conn_cnx, db_parameters):
     """
     [s3] Put and Get Small Data via User Stage
     """
+    if is_public_test or 'AWS_ACCESS_KEY_ID' not in os.environ:
+        pytest.skip('This test requires to change the internal parameter')
     _put_get_user_stage(tmpdir, test_files, conn_cnx, db_parameters,
                         number_of_files=5, number_of_lines=10)
 
 
-@pytest.mark.skipif(
-    'AWS_ACCESS_KEY_ID' not in os.environ,
-    reason="Snowflake admin account is not accessible."
-)
-def test_put_get_large_data_via_user_stage(tmpdir, test_files, conn_cnx,
-                                           db_parameters):
+def test_put_get_large_data_via_user_stage(
+        is_public_test, tmpdir, test_files, conn_cnx, db_parameters):
     """
     [s3] Put and Get Large Data via User Stage
     """
+    if is_public_test or 'AWS_ACCESS_KEY_ID' not in os.environ:
+        pytest.skip('This test requires to change the internal parameter')
     _put_get_user_stage(tmpdir, test_files, conn_cnx, db_parameters,
                         number_of_files=2,
                         number_of_lines=200000)
@@ -47,11 +46,11 @@ def _put_get_user_stage(tmpdir, test_files, conn_cnx, db_parameters,
     assert 'AWS_SECRET_ACCESS_KEY' in os.environ, \
         'AWS_SECRET_ACCESS_KEY is missing'
 
-    tmp_dir = test_files(tmpdir, number_of_lines, number_of_files)
+    tmp_dir = test_files(number_of_lines, number_of_files, tmp_dir=str(tmpdir.mkdir('data')))
 
     files = os.path.join(tmp_dir, 'file*')
 
-    stage_name = db_parameters['name'] + '_stage_{0}_{1}'.format(
+    stage_name = db_parameters['name'] + '_stage_{}_{}'.format(
         number_of_files,
         number_of_lines)
     with conn_cnx(
@@ -70,7 +69,7 @@ pct float,
 ratio number(6,2))
 """.format(name=db_parameters['name']))
         user_bucket = os.getenv('SF_AWS_USER_BUCKET',
-                                "sfc-dev1-regression/{0}/reg".format(
+                                "sfc-dev1-regression/{}/reg".format(
                                     getuser()))
         cnx.cursor().execute("""
 create or replace stage {stage_name}
@@ -122,7 +121,7 @@ credentials=(
                 "get @{stage_name}/ file://{tmp_dir_user}/".format(
                     stage_name=stage_name,
                     tmp_dir_user=tmp_dir_user))
-            for root, _, files in os.walk(tmp_dir_user):
+            for _, _, files in os.walk(tmp_dir_user):
                 for file in files:
                     mimetypes.init()
                     _, encoding = mimetypes.guess_type(file)
@@ -142,23 +141,22 @@ credentials=(
                     name=db_parameters['name']))
 
 
-@pytest.mark.skipif(
-    'AWS_ACCESS_KEY_ID' not in os.environ,
-    reason="Snowflake admin account is not accessible."
-)
-def test_put_get_duplicated_data_user_stage(tmpdir, test_files, conn_cnx,
+def test_put_get_duplicated_data_user_stage(is_public_test, tmpdir, test_files, conn_cnx,
                                             db_parameters,
                                             number_of_files=5,
                                             number_of_lines=100):
     """
     [s3] Put and Get Duplicated Data using User Stage
     """
+    if is_public_test or 'AWS_ACCESS_KEY_ID' not in os.environ:
+        pytest.skip('This test requires to change the internal parameter')
+
     logger = getLogger(__name__)
     assert 'AWS_ACCESS_KEY_ID' in os.environ, 'AWS_ACCESS_KEY_ID is missing'
     assert 'AWS_SECRET_ACCESS_KEY' in os.environ, \
         'AWS_SECRET_ACCESS_KEY is missing'
 
-    tmp_dir = test_files(tmpdir, number_of_lines, number_of_files)
+    tmp_dir = test_files(number_of_lines, number_of_files, tmp_dir=str(tmpdir.mkdir('data')))
 
     files = os.path.join(tmp_dir, 'file*')
 
@@ -179,7 +177,7 @@ pct float,
 ratio number(6,2))
 """.format(name=db_parameters['name']))
         user_bucket = os.getenv('SF_AWS_USER_BUCKET',
-                                "sfc-dev1-regression/{0}/reg".format(
+                                "sfc-dev1-regression/{}/reg".format(
                                     getuser()))
         cnx.cursor().execute("""
 create or replace stage {stage_name}
@@ -244,8 +242,8 @@ credentials=(
             c = cnx.cursor()
             try:
                 for rec in c.execute(
-                        "put file://{file} @{stage_name}".format(
-                            file=files, stage_name=stage_name)):
+                        "put file://{file} @{stage_name}".format(file=files, stage_name=stage_name),
+                        _raise_put_get_error=False):
                     logger.info('rec=%s', rec)
                     if rec[6] == 'UPLOADED':
                         success_cnt += 1
@@ -283,7 +281,7 @@ credentials=(
                 "get @{stage_name}/ file://{tmp_dir_user}/".format(
                     stage_name=stage_name,
                     tmp_dir_user=tmp_dir_user))
-            for root, _, files in os.walk(tmp_dir_user):
+            for _, _, files in os.walk(tmp_dir_user):
                 for file in files:
                     mimetypes.init()
                     _, encoding = mimetypes.guess_type(file)
@@ -302,25 +300,20 @@ credentials=(
                     name=db_parameters['name']))
 
 
-@pytest.mark.skipif(
-    'AWS_ACCESS_KEY_ID' not in os.environ,
-    reason="Snowflake admin account is not accessible."
-)
-def test_get_data_user_stage(tmpdir, conn_cnx, db_parameters):
+def test_get_data_user_stage(is_public_test, tmpdir, conn_cnx, db_parameters):
     """
     SNOW-20927: get failed with 404 error
     """
-    assert 'AWS_ACCESS_KEY_ID' in os.environ, 'AWS_ACCESS_KEY_ID is missing'
-    assert 'AWS_SECRET_ACCESS_KEY' in os.environ, \
-        'AWS_SECRET_ACCESS_KEY is missing'
+    if is_public_test or 'AWS_ACCESS_KEY_ID' not in os.environ:
+        pytest.skip('This test requires to change the internal parameter')
 
     default_s3bucket = os.getenv('SF_AWS_USER_BUCKET',
-                                 "sfc-dev1-regression/{0}/reg".format(
+                                 "sfc-dev1-regression/{}/reg".format(
                                      getuser()))
     test_data = [
         {
             's3location':
-                '{0}/{1}'.format(
+                '{}/{}'.format(
                     default_s3bucket, db_parameters['name'] + '_stage'),
             'stage_name': db_parameters['name'] + '_stage1',
             'data_file_name': 'data.txt',

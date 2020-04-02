@@ -3,23 +3,22 @@
 #
 # Copyright (c) 2012-2019 Snowflake Computing Inc. All right reserved.
 
+from os import chmod, path
+
 import pytest
-from os import path, chmod
-from snowflake.connector.compat import PY2
+from mock import MagicMock
+from snowflake.connector.compat import IS_WINDOWS
 from snowflake.connector.errors import Error
 from snowflake.connector.file_transfer_agent import SnowflakeFileTransferAgent
-from snowflake.connector.compat import IS_WINDOWS
 
-if PY2:
-    from mock import MagicMock
-else:
-    from unittest.mock import MagicMock
+# Mark every test in this module as a putget test
+pytestmark = pytest.mark.putget
 
 
 @pytest.mark.skipif(IS_WINDOWS, reason='permission model is different')
 def test_put_error(tmpdir):
     """
-    Test for raise_put_get_error flag in SnowflakeFileTransferAgent
+    Test for raise_put_get_error flag (now turned on by default) in SnowflakeFileTransferAgent
     """
     tmp_dir = str(tmpdir.mkdir('putfiledir'))
     file1 = path.join(tmp_dir, 'file1')
@@ -64,6 +63,15 @@ def test_put_error(tmpdir):
         query,
         ret,
         raise_put_get_error=True)
+    sf_file_transfer_agent.execute()
+    with pytest.raises(Exception):
+        sf_file_transfer_agent.result()
+
+    # unspecified, should fail because flag is on by default now
+    sf_file_transfer_agent = SnowflakeFileTransferAgent(
+        cursor,
+        query,
+        ret)
     sf_file_transfer_agent.execute()
     with pytest.raises(Exception):
         sf_file_transfer_agent.result()

@@ -8,6 +8,86 @@ Source code is also available at: https://github.com/snowflakedb/snowflake-conne
 
 Release Notes
 -------------------------------------------------------------------------------
+
+- v2.2.3(March 30,2020)
+ 
+    - Secure SSO ID Token
+    - Add use_openssl_only connection parameter, which disables the usage of pure Python cryptographic libraries for FIPS
+    - Add manylinux1 as well as manylinux2010
+    - Fix a bug where a certificate file was opened and never closed in snowflake-connector-python.
+    - Fix python connector skips validating GCP URLs
+    - Adds additional client driver config information to in band telemetry.
+
+- v2.2.2(March 9,2020)
+
+    - Fix retry with chunck_downloader.py for stability.
+    - Support Python 3.8 for Linux and Mac.
+
+- v2.2.1(February 18,2020)
+  
+    - Fix use DictCursor with execute_string #248
+
+- v2.2.0(January 27,2020)
+
+    - Drop Python 2.7 support
+    - AWS: When OVERWRITE is false, which is set by default, the file is uploaded if no same file name exists in the stage. This used to check the content signature but it will no longer check. Azure and GCP already work this way.
+    - Document Python connector dependencies on our GitHub page in addition to Snowflake docs.
+    - Fix sqlalchemy and possibly python-connector warnings.
+    - Fix GCP exception using the Python connector to PUT a file in a stage with auto_compress=false.
+    - Bump up botocore requirements to 1.14.
+    - Fix uppercaseing authenticator breaks Okta URL which may include case-sensitive elements(#257).
+    - Fix wrong result bug while using fetch_pandas_all() to get fixed numbers with large scales.
+    - Increase multi part upload threshold for S3 to 64MB.
+
+- v2.1.3(January 06,2020)
+
+    - Fix GCP Put failed after hours
+
+- v2.1.2(December 16,2019)
+
+    - Fix the arrow bundling issue for python connector on mac.
+    - Fix the arrow dll bundle issue on windows.Add more logging.
+
+- v2.1.1(December 12,2019)
+
+    - Fix GZIP uncompressed content for Azure GET command.
+    - Add support for GCS PUT and GET for private preview.
+    - Support fetch as numpy value in arrow result format.
+    - Fix NameError: name 'EmptyPyArrowIterator' is not defined for Mac.
+    - Return empty dataframe for fetch_pandas_all() api if result set is empty.
+
+- v2.1.0(December 2,2019)
+
+    - Fix default `ssl_context` options
+    - Pin more dependencies for Python Connector
+    - Fix import of SnowflakeOCSPAsn1Crypto crashes Python on MacOS Catalina
+    - Update the release note that 1.9.0 was removed
+    - Support DictCursor for arrow result format
+    - Upgrade Python's arrow lib to 0.15.1
+    - Raise Exception when PUT fails to Upload Data
+    - Handle year out of range correctly in arrow result format
+
+- v2.0.4(November 13,2019)
+
+    - Increase OCSP Cache expiry time from 24 hours to 120 hours.
+    - Fix pyarrow cxx11 abi compatibility issue
+    - Use new query result format parameter in python tests
+
+- v2.0.3(November 1,2019)
+
+    - Fix for ,Pandas fetch API did not handle the case that first chunk is empty correctly.
+    - Updated with botocore, boto3 and requests packages to the latest version.
+    - Pinned stable versions of Azure urllib3 packages.
+
+- v2.0.2(October 21,2019)
+
+    - Fix sessions remaining open even if they are disposed manually. Retry deleting session if the connection is explicitly closed.
+    - Fix memory leak in the new fetch pandas API
+    - Fix Auditwheel failed with python37
+    - Reduce the footprint of Python Connector
+    - Support asn1crypto 1.1.x
+    - Ensure that the cython components are present for Conda package
+
 - v2.0.1(October 04,2019)
 
     - Add asn1crypto requirement to mitigate incompatibility change
@@ -26,7 +106,11 @@ Release Notes
     - Update Python Driver URL Whitelist to support US Gov domain
     - Fix memory leak in python connector panda df fetch API
 
-- v1.9.0(August 26,2019)
+- v1.9.1(October 4,2019)
+
+    - Add asn1crypto requirement to mitigate incompatibility change.
+
+- v1.9.0(August 26,2019) **REMOVED from pypi due to dependency compatibility issues**
 
     - Implement converter for all arrow data types in python connector extension
     - Fix arrow error when returning empty result using python connecter
@@ -45,7 +129,7 @@ Release Notes
     - Fix Azure Gov PUT and GET issue
 
 - v1.8.6(July 29,2019)
-   
+
     - Reduce retries for OCSP from Python Driver
     - Azure PUT issue: ValueError: I/O operation on closed file
     - Add client information to USER-AGENT HTTP header - PythonConnector
@@ -81,13 +165,13 @@ Release Notes
     - Add Option to Skip Request Pooling
     - Add OCSP_MODE metric
     - Fixed PUT URI issue for Windows path
-    - OCSP SoftFail 
+    - OCSP SoftFail
 
 - v1.7.11 (April 22, 2019)
 
     - numpy timestamp with timezone support
     - qmark not binding None
- 
+
 - v1.7.10 (April 8, 2019)
 
     - Fix the incorrect custom Server URL in Python Driver for Privatelink
@@ -177,7 +261,7 @@ Release Notes
 
     - Enforce virtual host URL for PUT and GET.
     - Added retryCount, clientStarTime for query-request for better service.
-    
+
 - v1.6.6 (August 9, 2018)
 
     - Replaced ``pycryptodome`` with ``pycryptodomex`` to avoid namespace conflict with ``PyCrypto``.
@@ -466,7 +550,7 @@ Release Notes
 
     - Added support for the ``BINARY`` data type, which enables support for more Python data types:
 
-        - Python 3: 
+        - Python 3:
 
             - ``bytes`` and ``bytearray`` can be used for binding.
             - ``bytes`` is also used for fetching ``BINARY`` data type.
@@ -579,12 +663,12 @@ Release Notes
 - v1.0.3 (Jan 13, 2016)
 
     - Added support for the ``BOOLEAN`` data type (i.e. ``TRUE`` or ``FALSE``). This changes the behavior of the binding for the ``bool`` type object:
-     
+
         - Previously, ``bool`` was bound as a numeric value (i.e. ``1`` for ``True``, ``0`` for ``False``).
         - Now, ``bool`` is bound as native SQL data (i.e. ``TRUE`` or ``FALSE``).
 
     - Added the ``autocommit`` method to the ``Connection`` object:
-     
+
         - By default, ``autocommit`` mode is ON (i.e. each DML statement commits the change).
         - If ``autocommit`` mode is OFF, the ``commit`` and ``rollback`` methods are enabled.
 
@@ -602,4 +686,3 @@ Release Notes
 - v1.0.0 (Dec 1, 2015)
 
     - General Availability release.
-

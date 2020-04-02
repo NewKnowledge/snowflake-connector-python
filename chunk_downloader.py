@@ -4,28 +4,24 @@
 # Copyright (c) 2012-2019 Snowflake Computing Inc. All right reserved.
 #
 
+import json
+import time
 from collections import namedtuple
+from gzip import GzipFile
+from io import BytesIO
 from logging import getLogger
 from multiprocessing.pool import ThreadPool
-from threading import (Condition, Lock)
+from threading import Condition, Lock
 
 from snowflake.connector.gzip_decoder import decompress_raw_data
 from snowflake.connector.util_text import split_rows_from_stream
-from .errorcode import (ER_CHUNK_DOWNLOAD_FAILED)
-from .errors import (Error, OperationalError)
-from .time_util import get_time_millis
-import json
-from io import BytesIO
-from gzip import GzipFile
 
-try:
-    from pyarrow.ipc import open_stream
-    from .arrow_iterator import PyArrowIterator
-    from .arrow_context import ArrowConverterContext
-except ImportError:
-    pass
+from .arrow_context import ArrowConverterContext
+from .errorcode import ER_CHUNK_DOWNLOAD_FAILED
+from .errors import Error, OperationalError
+from .time_util import get_time_millis, DecorrelateJitterBackoff
 
-DEFAULT_REQUEST_TIMEOUT = 3600
+DEFAULT_REQUEST_TIMEOUT = 7
 
 DEFAULT_CLIENT_PREFETCH_THREADS = 4
 MAX_CLIENT_PREFETCH_THREADS = 10
@@ -118,41 +114,50 @@ class SnowflakeChunkDownloader(object):
         """
         logger.debug(u'downloading chunk %s/%s', idx + 1, self._chunk_size)
         headers = {}
-        try:
-            if self._chunk_headers is not None:
-                headers = self._chunk_headers
-                logger.debug(u'use chunk headers from result')
-            elif self._qrmk is not None:
-                headers[SSE_C_ALGORITHM] = SSE_C_AES
-                headers[SSE_C_KEY] = self._qrmk
+        if self._chunk_headers is not None:
+            headers = self._chunk_headers
+            logger.debug(u'use chunk headers from result')
+        elif self._qrmk is not None:
+            headers[SSE_C_ALGORITHM] = SSE_C_AES
+            headers[SSE_C_KEY] = self._qrmk
 
-            logger.debug(u"started getting the result set %s: %s",
-                         idx + 1, self._chunks[idx].url)
-            result_data = self._fetch_chunk(self._chunks[idx].url, headers)
-            logger.debug(u"finished getting the result set %s: %s",
-                         idx + 1, self._chunks[idx].url)
+        last_error = None
+        backoff = DecorrelateJitterBackoff(1, 16)
+        sleep_timer = 1
+        for retry in range(10):
+            try:
+                logger.debug(u"started getting the result set %s: %s",
+                             idx + 1, self._chunks[idx].url)
+                result_data = self._fetch_chunk(self._chunks[idx].url, headers)
+                logger.debug(u"finished getting the result set %s: %s",
+                             idx + 1, self._chunks[idx].url)
 
-            if isinstance(result_data, ResultIterWithTimings):
-                metrics = result_data.get_timings()
-                with self._downloading_chunks_lock:
-                    self._total_millis_downloading_chunks += metrics[
-                        ResultIterWithTimings.DOWNLOAD]
-                    self._total_millis_parsing_chunks += metrics[
-                        ResultIterWithTimings.PARSE]
+                if isinstance(result_data, ResultIterWithTimings):
+                    metrics = result_data.get_timings()
+                    with self._downloading_chunks_lock:
+                        self._total_millis_downloading_chunks += metrics[
+                            ResultIterWithTimings.DOWNLOAD]
+                        self._total_millis_parsing_chunks += metrics[
+                            ResultIterWithTimings.PARSE]
 
-            with self._chunk_cond:
-                self._chunks[idx] = self._chunks[idx]._replace(
-                    result_data=result_data,
-                    ready=True)
-                self._chunk_cond.notify_all()
-                logger.debug(
-                    u'added chunk %s/%s to a chunk list.', idx + 1,
-                    self._chunk_size)
-        except Exception as e:
-            logger.exception(
-                u'Failed to fetch the large result set chunk %s/%s',
-                idx + 1, self._chunk_size)
-            self._downloader_error = e
+                with self._chunk_cond:
+                    self._chunks[idx] = self._chunks[idx]._replace(
+                        result_data=result_data,
+                        ready=True)
+                    self._chunk_cond.notify_all()
+                    logger.debug(
+                        u'added chunk %s/%s to a chunk list.', idx + 1,
+                        self._chunk_size)
+                break
+            except Exception as e:
+                last_error = e
+                sleep_timer = backoff.next_sleep(1, sleep_timer)
+                logger.exception(
+                    u'Failed to fetch the large result set chunk %s/%s for the %s th time, backing off for %s s',
+                    idx + 1, self._chunk_size, retry + 1, sleep_timer)
+                time.sleep(sleep_timer)
+        else:
+            self._downloader_error = last_error
 
     def next_chunk(self):
         """
@@ -244,7 +249,7 @@ class SnowflakeChunkDownloader(object):
     def __del__(self):
         try:
             self.terminate()
-        except:
+        except Exception:
             # ignore all errors in the destructor
             pass
 
@@ -255,7 +260,7 @@ class SnowflakeChunkDownloader(object):
         handler = JsonBinaryHandler(is_raw_binary_iterator=True,
                                     use_ijson=self._use_ijson) \
             if self._query_result_format == 'json' else \
-            ArrowBinaryHandler(self._cursor.description, self._connection)
+            ArrowBinaryHandler(self._cursor, self._connection)
 
         return self._connection.rest.fetch(
             u'get', url, headers,
@@ -322,15 +327,16 @@ class JsonBinaryHandler(RawBinaryDataHandler):
 
 class ArrowBinaryHandler(RawBinaryDataHandler):
 
-    def __init__(self, meta, connection):
-        self._meta = meta
+    def __init__(self, cursor, connection):
+        self._cursor = cursor
         self._arrow_context = ArrowConverterContext(connection._session_parameters)
 
     """
     Handler to consume data as arrow stream
     """
     def to_iterator(self, raw_data_fd, download_time):
+        from .arrow_iterator import PyArrowIterator
         gzip_decoder = GzipFile(fileobj=raw_data_fd, mode='r')
-        reader = open_stream(gzip_decoder)
-        it = PyArrowIterator(reader, self._arrow_context)
+        it = PyArrowIterator(self._cursor, gzip_decoder, self._arrow_context, self._cursor._use_dict_result,
+                             self._cursor.connection._numpy)
         return it

@@ -7,8 +7,6 @@
 import re
 from datetime import datetime, timedelta
 
-import six
-
 import snowflake.connector
 from snowflake.connector.converter import ZERO_EPOCH
 from snowflake.connector.converter_null import SnowflakeNoConverterToPython
@@ -33,6 +31,9 @@ def test_converter_no_converter_to_python(db_parameters):
         timezone='UTC',
         converter_class=SnowflakeNoConverterToPython,
     )
+    con.cursor().execute("""
+alter session set python_connector_query_result_format='JSON'
+""")
 
     ret = con.cursor().execute("""
 select  current_timestamp(),
@@ -40,9 +41,9 @@ select  current_timestamp(),
         2.0::FLOAT,
         'test1'
 """).fetchone()
-    assert isinstance(ret[0], six.text_type)
+    assert isinstance(ret[0], str)
     assert NUMERIC_VALUES.match(ret[0])
-    assert isinstance(ret[1], six.text_type)
+    assert isinstance(ret[1], str)
     assert NUMERIC_VALUES.match(ret[1])
     con.cursor().execute("create or replace table testtb(c1 timestamp_ntz(6))")
     try:

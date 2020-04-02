@@ -4,16 +4,13 @@
 # Copyright (c) 2012-2019 Snowflake Computing Inc. All right reserved.
 #
 
-from datetime import timedelta, time
+from datetime import time, timedelta
 
 import pytest
 import pytz
-
-from snowflake.connector.compat import PY2, PY34_EXACT, IS_WINDOWS
-from snowflake.connector.converter import (
-    ZERO_EPOCH,
-    _generate_tzinfo_from_tzoffset)
-from snowflake.connector.converter_snowsql import (SnowflakeConverterSnowSQL)
+from snowflake.connector.compat import IS_WINDOWS
+from snowflake.connector.converter import ZERO_EPOCH, _generate_tzinfo_from_tzoffset
+from snowflake.connector.converter_snowsql import SnowflakeConverterSnowSQL
 
 
 def _compose_tz(dt, tzinfo):
@@ -227,6 +224,9 @@ SELECT
     with conn_cnx(converter_class=converter_class) as cnx:
         cur = cnx.cursor()
         cur.execute("""
+alter session set python_connector_query_result_format='JSON'
+""")
+        cur.execute("""
 ALTER SESSION SET TIMEZONE='{tz}';
 """.format(tz=PST_TZ))
         cur.execute("""
@@ -346,7 +346,6 @@ SELECT
         assert ret[1] == r1
 
 
-@pytest.mark.skipif(PY2, reason="the datetime strftime() methods require year >= 1900")
 def test_date_0001_9999(conn_cnx):
     """
     Test 0001 and 9999 for all platforms
@@ -359,6 +358,9 @@ ALTER SESSION SET
     DATE_OUTPUT_FORMAT='YYYY-MM-DD'
 """)
         cur = cnx.cursor()
+        cur.execute("""
+alter session set python_connector_query_result_format='JSON'
+""")
         cur.execute("""
 SELECT
     DATE_FROM_PARTS(1900, 1, 1),
@@ -374,7 +376,7 @@ SELECT
         assert ret[3] == '9999-03-20'
 
 
-@pytest.mark.skipif(PY2 or IS_WINDOWS, reason="year out of range error")
+@pytest.mark.skipif(IS_WINDOWS, reason="year out of range error")
 def test_five_or_more_digit_year_date_converter(conn_cnx):
     """
     Past and future dates
@@ -387,6 +389,9 @@ ALTER SESSION SET
     DATE_OUTPUT_FORMAT='YYYY-MM-DD'
 """)
         cur = cnx.cursor()
+        cur.execute("""
+alter session set python_connector_query_result_format='JSON'
+""")
         cur.execute("""
 SELECT
     DATE_FROM_PARTS(10000, 1, 1),
@@ -432,6 +437,9 @@ def test_franction_followed_by_year_format(conn_cnx):
     """
     with conn_cnx(converter_class=SnowflakeConverterSnowSQL) as cnx:
         cnx.cursor().execute("""
+alter session set python_connector_query_result_format='JSON'
+""")
+        cnx.cursor().execute("""
 ALTER SESSION SET
     TIMESTAMP_OUTPUT_FORMAT='HH24:MI:SS.FF6 MON DD, YYYY',
     TIMESTAMP_NTZ_OUTPUT_FORMAT='HH24:MI:SS.FF6 MON DD, YYYY'
@@ -469,6 +477,9 @@ SELECT
     with conn_cnx(converter_class=converter_class) as cnx:
         cur = cnx.cursor()
         cur.execute("""
+alter session set python_connector_query_result_format='JSON'
+""")
+        cur.execute("""
 ALTER SESSION SET TIMEZONE='{tz}';
 """.format(tz=PST_TZ))
         cur.execute("""
@@ -484,11 +495,9 @@ ALTER SESSION SET
         assert ret[2] == '1900-01-01 05:00:01.000000000 +0000'
         assert ret[3] == '1900-01-01 05:00:01.000000000'
         assert ret[4] == '1900-01-01 05:00:01.012000000 +0000'
-        if not PY2 and not PY34_EXACT:
-            assert ret[5] == '1900-01-01 05:00:01.012000000'
+        assert ret[5] == '1900-01-01 05:00:01.012000000'
         assert ret[6] == '1900-01-01 05:00:00.012000000 +0000'
-        if not PY2 and not PY34_EXACT:
-            assert ret[7] == '1900-01-01 05:00:00.012000000'
+        assert ret[7] == '1900-01-01 05:00:00.012000000'
         assert ret[8] == '2100-01-01 05:00:00.012000000 +0000'
         assert ret[9] == '2100-01-01 05:00:00.012000000'
         assert ret[10] == '1970-01-01 00:00:00.000000000 +0000'

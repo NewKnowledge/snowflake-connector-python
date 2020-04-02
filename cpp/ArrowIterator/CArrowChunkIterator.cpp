@@ -14,35 +14,49 @@
 #include "TimeConverter.hpp"
 #include <string>
 
+#define SF_CHECK_PYTHON_ERR() \
+  if (py::checkPyError())\
+  {\
+    PyObject *type, * val, *traceback;\
+    PyErr_Fetch(&type, &val, &traceback);\
+    PyErr_Clear();\
+    m_currentPyException.reset(val);\
+\
+    Py_XDECREF(type);\
+    Py_XDECREF(traceback);\
+\
+    return std::make_shared<ReturnVal>(nullptr, m_currentPyException.get());\
+  }
+
+
 namespace sf
 {
 
-CArrowChunkIterator::CArrowChunkIterator(PyObject* context, PyObject* batches)
+CArrowChunkIterator::CArrowChunkIterator(PyObject* context, std::vector<std::shared_ptr<arrow::RecordBatch>> *batches,
+                                         PyObject* use_numpy)
 : CArrowIterator(batches), m_latestReturnedRow(nullptr), m_context(context)
 {
-  m_batchCount = m_cRecordBatches.size();
-  m_columnCount = m_batchCount > 0 ? m_cRecordBatches[0]->num_columns() : 0;
+  m_batchCount = m_cRecordBatches->size();
+  m_columnCount = m_batchCount > 0 ? (*m_cRecordBatches)[0]->num_columns() : 0;
   m_currentBatchIndex = -1;
   m_rowIndexInBatch = -1;
   m_rowCountInBatch = 0;
   m_latestReturnedRow.reset();
+  m_useNumpy = PyObject_IsTrue(use_numpy);
 
-  logger.debug("Arrow chunk info: batchCount %d, columnCount %d", m_batchCount,
-               m_columnCount);
+  logger.debug("Arrow chunk info: batchCount %d, columnCount %d, use_numpy: %d", m_batchCount,
+               m_columnCount, m_useNumpy);
 }
 
-PyObject* CArrowChunkIterator::next()
+std::shared_ptr<ReturnVal> CArrowChunkIterator::next()
 {
   m_rowIndexInBatch++;
 
   if (m_rowIndexInBatch < m_rowCountInBatch)
   {
-    this->currentRowAsTuple();
-    if (py::checkPyError())
-    {
-      return nullptr;
-    }
-    return m_latestReturnedRow.get();
+    this->createRowPyObject();
+    SF_CHECK_PYTHON_ERR()
+    return std::make_shared<ReturnVal>(m_latestReturnedRow.get(), nullptr);
   }
   else
   {
@@ -50,31 +64,26 @@ PyObject* CArrowChunkIterator::next()
     if (m_currentBatchIndex < m_batchCount)
     {
       m_rowIndexInBatch = 0;
-      m_rowCountInBatch = m_cRecordBatches[m_currentBatchIndex]->num_rows();
+      m_rowCountInBatch = (*m_cRecordBatches)[m_currentBatchIndex]->num_rows();
       this->initColumnConverters();
-      if (py::checkPyError())
-      {
-        return nullptr;
-      }
+      SF_CHECK_PYTHON_ERR()
 
       logger.debug("Current batch index: %d, rows in current batch: %d",
                   m_currentBatchIndex, m_rowCountInBatch);
 
-      this->currentRowAsTuple();
-      if (py::checkPyError())
-      {
-        return nullptr;
-      }
-      return m_latestReturnedRow.get();
+      this->createRowPyObject();
+      SF_CHECK_PYTHON_ERR()
+
+      return std::make_shared<ReturnVal>(m_latestReturnedRow.get(), nullptr);
     }
   }
 
   /** It looks like no one will decrease the ref of this Py_None, so we don't
    * increament the ref count here */
-  return Py_None;
+  return std::make_shared<ReturnVal>(Py_None, nullptr);
 }
 
-void CArrowChunkIterator::currentRowAsTuple()
+void CArrowChunkIterator::createRowPyObject()
 {
   m_latestReturnedRow.reset(PyTuple_New(m_columnCount));
   for (int i = 0; i < m_columnCount; i++)
@@ -90,14 +99,14 @@ void CArrowChunkIterator::initColumnConverters()
 {
   m_currentBatchConverters.clear();
   std::shared_ptr<arrow::RecordBatch> currentBatch =
-      m_cRecordBatches[m_currentBatchIndex];
-  std::shared_ptr<arrow::Schema> schema = currentBatch->schema();
+      (*m_cRecordBatches)[m_currentBatchIndex];
+  m_currentSchema = currentBatch->schema();
   for (int i = 0; i < currentBatch->num_columns(); i++)
   {
     std::shared_ptr<arrow::Array> columnArray = currentBatch->column(i);
-    std::shared_ptr<arrow::DataType> dt = schema->field(i)->type();
+    std::shared_ptr<arrow::DataType> dt = m_currentSchema->field(i)->type();
     std::shared_ptr<const arrow::KeyValueMetadata> metaData =
-        schema->field(i)->metadata();
+        m_currentSchema->field(i)->metadata();
     SnowflakeType::Type st = SnowflakeType::snowflakeTypeFromString(
         metaData->value(metaData->FindKey("logicalType")));
 
@@ -115,69 +124,47 @@ void CArrowChunkIterator::initColumnConverters()
         switch (dt->id())
         {
 
-          case arrow::Type::type::INT8:
-          {
-            if (scale > 0)
-            {
-              m_currentBatchConverters.push_back(std::make_shared<
-                  sf::DecimalFromIntConverter<arrow::Int8Array>>(
-                  columnArray, precision, scale));
-              break;
-            }
-
-            m_currentBatchConverters.push_back(
-                std::make_shared<sf::IntConverter<arrow::Int8Array>>(
-                    columnArray));
-            break;
+#define _SF_INIT_FIXED_CONVERTER(ARROW_TYPE, ARROW_ARRAY_TYPE) \
+          case arrow::Type::type::ARROW_TYPE: \
+          {\
+            if (scale > 0)\
+            {\
+              if (m_useNumpy)\
+              {\
+                m_currentBatchConverters.push_back(std::make_shared<\
+                    sf::NumpyDecimalConverter<arrow::ARROW_ARRAY_TYPE##Array>>(\
+                    columnArray, precision, scale, m_context));\
+              }\
+              else\
+              {\
+                m_currentBatchConverters.push_back(std::make_shared<\
+                    sf::DecimalFromIntConverter<arrow::ARROW_ARRAY_TYPE##Array>>(\
+                    columnArray, precision, scale));\
+              }\
+            }\
+            else\
+            {\
+              if (m_useNumpy)\
+              {\
+                m_currentBatchConverters.push_back(\
+                    std::make_shared<sf::NumpyIntConverter<arrow::ARROW_ARRAY_TYPE##Array>>(\
+                    columnArray, m_context));\
+              }\
+              else\
+              {\
+                m_currentBatchConverters.push_back(\
+                    std::make_shared<sf::IntConverter<arrow::ARROW_ARRAY_TYPE##Array>>(\
+                    columnArray));\
+              }\
+            }\
+            break;\
           }
 
-          case arrow::Type::type::INT16:
-          {
-            if (scale > 0)
-            {
-              m_currentBatchConverters.push_back(std::make_shared<
-                  sf::DecimalFromIntConverter<arrow::Int16Array>>(
-                  columnArray, precision, scale));
-              break;
-            }
-
-            m_currentBatchConverters.push_back(
-                std::make_shared<sf::IntConverter<arrow::Int16Array>>(
-                    columnArray));
-            break;
-          }
-
-          case arrow::Type::type::INT32:
-          {
-            if (scale > 0)
-            {
-              m_currentBatchConverters.push_back(std::make_shared<
-                  sf::DecimalFromIntConverter<arrow::Int32Array>>(
-                  columnArray, precision, scale));
-              break;
-            }
-
-            m_currentBatchConverters.push_back(
-                std::make_shared<sf::IntConverter<arrow::Int32Array>>(
-                    columnArray));
-            break;
-          }
-
-          case arrow::Type::type::INT64:
-          {
-            if (scale > 0)
-            {
-              m_currentBatchConverters.push_back(std::make_shared<
-                  sf::DecimalFromIntConverter<arrow::Int64Array>>(
-                  columnArray, precision, scale));
-              break;
-            }
-
-            m_currentBatchConverters.push_back(
-                std::make_shared<sf::IntConverter<arrow::Int64Array>>(
-                    columnArray));
-            break;
-          }
+          _SF_INIT_FIXED_CONVERTER(INT8, Int8)
+          _SF_INIT_FIXED_CONVERTER(INT16, Int16)
+          _SF_INIT_FIXED_CONVERTER(INT32, Int32)
+          _SF_INIT_FIXED_CONVERTER(INT64, Int64)
+#undef _SF_INIT_FIXED_CONVERTER
 
           case arrow::Type::type::DECIMAL:
           {
@@ -222,15 +209,31 @@ void CArrowChunkIterator::initColumnConverters()
 
       case SnowflakeType::Type::REAL:
       {
-        m_currentBatchConverters.push_back(
-            std::make_shared<sf::FloatConverter>(columnArray));
+        if (m_useNumpy)
+        {
+          m_currentBatchConverters.push_back(
+              std::make_shared<sf::NumpyFloat64Converter>(columnArray, m_context));
+        }
+        else
+        {
+          m_currentBatchConverters.push_back(
+              std::make_shared<sf::FloatConverter>(columnArray));
+        }
         break;
       }
 
       case SnowflakeType::Type::DATE:
       {
-        m_currentBatchConverters.push_back(
-            std::make_shared<sf::DateConverter>(columnArray));
+        if (m_useNumpy)
+        {
+          m_currentBatchConverters.push_back(
+              std::make_shared<sf::NumpyDateConverter>(columnArray, m_context));
+        }
+        else
+        {
+          m_currentBatchConverters.push_back(
+              std::make_shared<sf::DateConverter>(columnArray));
+        }
         break;
       }
 
@@ -287,17 +290,35 @@ void CArrowChunkIterator::initColumnConverters()
         {
           case arrow::Type::type::INT64:
           {
-            m_currentBatchConverters.push_back(
-                std::make_shared<sf::OneFieldTimeStampNTZConverter>(
-                    columnArray, scale, m_context));
+            if (m_useNumpy)
+            {
+              m_currentBatchConverters.push_back(
+                  std::make_shared<sf::NumpyOneFieldTimeStampNTZConverter>(
+                      columnArray, scale, m_context));
+            }
+            else
+            {
+              m_currentBatchConverters.push_back(
+                  std::make_shared<sf::OneFieldTimeStampNTZConverter>(
+                      columnArray, scale, m_context));
+            }
             break;
           }
 
           case arrow::Type::type::STRUCT:
           {
-            m_currentBatchConverters.push_back(
-                std::make_shared<sf::TwoFieldTimeStampNTZConverter>(
-                    columnArray, scale, m_context));
+            if (m_useNumpy)
+            {
+              m_currentBatchConverters.push_back(
+                  std::make_shared<sf::NumpyTwoFieldTimeStampNTZConverter>(
+                      columnArray, scale, m_context));
+            }
+            else
+            {
+              m_currentBatchConverters.push_back(
+                  std::make_shared<sf::TwoFieldTimeStampNTZConverter>(
+                      columnArray, scale, m_context));
+            }
             break;
           }
 
@@ -405,6 +426,25 @@ void CArrowChunkIterator::initColumnConverters()
       }
     }
   }
+}
+
+DictCArrowChunkIterator::DictCArrowChunkIterator(PyObject* context,
+                                                 std::vector<std::shared_ptr<arrow::RecordBatch>> * batches,
+                                                 PyObject* use_numpy)
+: CArrowChunkIterator(context, batches, use_numpy)
+{
+}
+
+void DictCArrowChunkIterator::createRowPyObject()
+{
+  m_latestReturnedRow.reset(PyDict_New());
+  for (int i = 0; i < m_currentSchema->num_fields(); i++)
+  {
+    PyDict_SetItemString(
+        m_latestReturnedRow.get(), m_currentSchema->field(i)->name().c_str(),
+        m_currentBatchConverters[i]->toPyObject(m_rowIndexInBatch));
+  }
+  return;
 }
 
 }  // namespace sf

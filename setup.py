@@ -3,21 +3,20 @@
 #
 # Copyright (c) 2012-2019 Snowflake Computing Inc. All right reserved.
 #
-from codecs import open
-from os import path
 import os
 import sys
-from sys import platform
+from codecs import open
+from os import path
 from shutil import copy
-import glob
+from sys import platform
 
-from setuptools import setup, Extension
+from setuptools import Extension, setup
 
 THIS_DIR = path.dirname(path.realpath(__file__))
 
 try:
     from generated_version import VERSION
-except:
+except Exception:
     from version import VERSION
 version = '.'.join([str(v) for v in VERSION if v is not None])
 
@@ -42,6 +41,7 @@ if isBuildExtEnabled == 'true':
     from Cython.Build import cythonize
     import os
     import pyarrow
+    import numpy
 
     extensions = cythonize(
         [
@@ -51,6 +51,35 @@ if isBuildExtEnabled == 'true':
         build_dir=os.path.join('build', 'cython'))
 
     class MyBuildExt(build_ext):
+
+        # list of libraries that will be bundled with python connector,
+        # this list should be carefully examined when pyarrow lib is
+        # upgraded
+        arrow_libs_to_copy = {
+            'linux': ['libarrow.so.16',
+                      'libarrow_python.so.16',
+                      'libarrow_flight.so.16',
+                      'libarrow_boost_filesystem.so.1.68.0',
+                      'libarrow_boost_system.so.1.68.0',
+                      'libarrow_boost_regex.so.1.68.0'],
+            'darwin': ['libarrow.16.dylib',
+                       'libarrow_python.16.dylib',
+                       'libarrow_boost_filesystem.dylib',
+                       'libarrow_boost_regex.dylib',
+                       'libarrow_boost_system.dylib'],
+            'win32': ['arrow.dll',
+                      'arrow_python.dll',
+                      'zlib.dll']
+        }
+
+        arrow_libs_to_link = {
+            'linux': ['libarrow.so.16',
+                      'libarrow_python.so.16'],
+            'darwin': ['libarrow.16.dylib',
+                       'libarrow_python.16.dylib'],
+            'win32': ['arrow.lib',
+                      'arrow_python.lib']
+        }
 
         def build_extension(self, ext):
             current_dir = os.getcwd()
@@ -77,60 +106,52 @@ if isBuildExtEnabled == 'true':
                                 'cpp/Logging/logging.cpp']
                 ext.include_dirs.append('cpp/ArrowIterator/')
                 ext.include_dirs.append('cpp/Logging')
-                ext.include_dirs.append(pyarrow.get_include())
 
-                ext.extra_compile_args.append('-std=c++11')
+                if platform == 'win32':
+                    ext.include_dirs.append(pyarrow.get_include())
+                    ext.include_dirs.append(numpy.get_include())
+                elif platform == 'linux' or platform == 'darwin':
+                    ext.extra_compile_args.append('-isystem' + pyarrow.get_include())
+                    ext.extra_compile_args.append('-isystem' + numpy.get_include())
+                    ext.extra_compile_args.append('-std=c++11')
+                    ext.extra_compile_args.append('-D_GLIBCXX_USE_CXX11_ABI=0')
 
                 ext.library_dirs.append(os.path.join(current_dir, self.build_lib, 'snowflake', 'connector'))
                 ext.extra_link_args += self._get_arrow_lib_as_linker_input()
 
-                if self._is_unix():
+                # sys.platform for linux used to return with version suffix, (i.e. linux2, linux3)
+                # After version 3.3, it will always be just 'linux'
+                # https://docs.python.org/3/library/sys.html#sys.platform
+                if platform == 'linux':
                     ext.extra_link_args += ['-Wl,-rpath,$ORIGIN']
+                elif platform == 'darwin':
+                    # rpath,$ORIGIN only work on linux, did not work on darwin. use @loader_path instead
+                    # fyi, https://medium.com/@donblas/fun-with-rpath-otool-and-install-name-tool-e3e41ae86172
+                    ext.extra_link_args += ['-rpath', '@loader_path']
 
             build_ext.build_extension(self, ext)
-
-        def _is_unix(self):
-            return platform.startswith('linux') or platform == 'darwin'
 
         def _get_arrow_lib_dir(self):
             return pyarrow.get_library_dirs()[0]
 
         def _copy_arrow_lib(self):
-            arrow_lib = self._get_libs_to_copy()
+            libs_to_bundle = self.arrow_libs_to_copy[sys.platform]
 
-            for lib in arrow_lib:
-                lib_pattern = self._get_pyarrow_lib_pattern(lib)
-                source = glob.glob(lib_pattern)[0]
-                copy(source, os.path.join(self.build_lib, 'snowflake', 'connector'))
+            for lib in libs_to_bundle:
+                source = '{}/{}'.format(self._get_arrow_lib_dir(), lib)
+                build_dir = path.join(self.build_lib, 'snowflake', 'connector')
+                copy(source, build_dir)
 
         def _get_arrow_lib_as_linker_input(self):
-            arrow_lib = pyarrow.get_libraries()
-            link_lib = []
-            for lib in arrow_lib:
-                lib_pattern = self._get_pyarrow_lib_pattern(lib)
-                source = glob.glob(lib_pattern)[0]
-                link_lib.append(source)
+            link_lib = self.arrow_libs_to_link[sys.platform]
+            ret = []
 
-            return link_lib
+            for lib in link_lib:
+                source = '{}/{}'.format(self._get_arrow_lib_dir(), lib)
+                assert path.exists(source)
+                ret.append(source)
 
-        def _get_libs_to_copy(self):
-            if self._is_unix():
-                return pyarrow.get_libraries() + \
-                    ['arrow_flight', 'arrow_boost_regex', 'arrow_boost_system', 'arrow_boost_filesystem']
-            elif platform == 'win32':
-                return pyarrow.get_libraries() + ['arrow_flight']
-            else:
-                raise RuntimeError('Building on platform {} is not supported yet.'.format(platform))
-
-        def _get_pyarrow_lib_pattern(self, lib_name):
-            if platform.startswith('linux'):
-                return '{}/lib{}.so*'.format(self._get_arrow_lib_dir(), lib_name)
-            elif platform == 'darwin':
-                return '{}/lib{}*dylib'.format(self._get_arrow_lib_dir(), lib_name)
-            elif platform == 'win32':
-                return '{}\\{}.lib'.format(self._get_arrow_lib_dir(), lib_name)
-            else:
-                raise RuntimeError('Building on platform {} is not supported yet.'.format(platform))
+            return ret
 
     cmd_class = {
         "build_ext": MyBuildExt
@@ -151,29 +172,26 @@ setup(
     download_url='https://www.snowflake.com/',
     use_2to3=False,
 
-    # NOTE: Python 3.4 will be dropped within one month.
-    python_requires='>=2.7.9,!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*',
+    python_requires='>=3.5',
 
     install_requires=[
-        'azure-common',
-        'azure-storage-blob',
-        'boto3>=1.4.4,<1.10.0',
-        'botocore>=1.5.0,<1.13.0',
-        'certifi',
-        'future',
-        'six',
-        'pytz',
-        'pycryptodomex>=3.2,!=3.5.0',
-        'pyOpenSSL>=16.2.0',
-        'cffi>=1.9',
-        'cryptography>=1.8.2',
-        'ijson',
-        'pyjwt',
-        'idna',
-        'asn1crypto<1.0.0',
-        'pyasn1>=0.4.0,<0.5.0;python_version<"3.0"',
-        'pyasn1-modules>=0.2.0,<0.3.0;python_version<"3.0"',
-        'enum34;python_version<"3.4"',
+        'azure-common<2.0.0',
+        'azure-storage-blob<12.0.0',
+        'boto3>=1.4.4,<1.12',
+        'botocore>=1.5.0,<1.15',
+        'requests<2.24.0',
+        'urllib3>=1.20,<1.26.0',
+        'certifi<2021.0.0',
+        'pytz<2021.0',
+        'pycryptodomex>=3.2,!=3.5.0,<4.0.0',
+        'pyOpenSSL>=16.2.0,<21.0.0',
+        'cffi>=1.9,<1.14',
+        'cryptography>=1.8.2,<3.0.0',
+        'ijson<3.0.0',
+        'pyjwt<2.0.0',
+        'idna<2.10',
+        'oscrypto<2.0.0',
+        'asn1crypto>0.24.0,<2.0.0',
     ],
 
     namespace_packages=['snowflake'],
@@ -203,12 +221,29 @@ setup(
     },
     extras_require={
         "secure-local-storage": [
-            'keyring!=16.1.0'
+            'keyring<22.0.0,!=16.1.0',
         ],
-        "arrow-result": [
-            'pyarrow>=0.14.0;python_version>"3.4"',
-            'pyarrow>=0.14.0;python_version<"3.0"'
-        ]
+        "pandas": [
+            'pyarrow>=0.15.1,<0.16.0;python_version=="3.5" and platform_system=="Windows"',
+            'pyarrow>=0.16.0,<0.17.0;python_version!="3.5" or platform_system!="Windows"',
+            'pandas==0.24.2;python_version=="3.5"',
+            'pandas>=1.0.0,<1.1.0;python_version>"3.5"',
+        ],
+        "development": [
+            'pytest',
+            'pytest-cov',
+            'pytest-rerunfailures',
+            'pytest-timeout',
+            'coverage',
+            'pexpect',
+            'mock',
+            'pytz',
+            'pytzdata',
+            'Cython',
+            'pendulum',
+            'more-itertools',
+            'numpy',
+        ],
     },
 
     classifiers=[
@@ -227,7 +262,6 @@ setup(
         'Operating System :: OS Independent',
 
         'Programming Language :: SQL',
-        'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
